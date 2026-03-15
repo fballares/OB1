@@ -10,20 +10,38 @@ This guide covers three things:
 
 ## The Two Memory Systems
 
-| System | What It Is | Where It Lives | Who Owns It |
-|--------|-----------|----------------|-------------|
-| **Open Brain** | Your personal knowledge base — thoughts, decisions, observations, research | Supabase (thoughts table via MCP) | You |
-| **Jen's Memory** | Agent workspace memory — your preferences, routines, how you like things done | QMD / Markdown files in Jen's workspace | Jen |
+| System | What It Is | Where It Lives | Search Tool | Who Owns It |
+|--------|-----------|----------------|-------------|-------------|
+| **Open Brain** | Your personal knowledge base — thoughts, decisions, observations, research | Supabase (thoughts table via MCP) | `search_thoughts` (semantic vector search via OpenRouter embeddings) | You |
+| **Jen's Memory (QMD)** | Agent workspace memory — your preferences, routines, how you like things done | Markdown files in Jen's workspace, indexed by QMD | `memory_search` (BM25 + local vector embeddings via QMD) | Jen |
 
-**The rule:** Open Brain is *your* memory. Jen's QMD is *her* memory about you. Both are valuable. Both should be searchable. The difference is intent.
+**The rule:** Open Brain is *your* memory. Jen's QMD is *her* memory about you. Both are valuable. Both are semantically searchable. The difference is intent.
 
-| You say... | What happens |
-|------------|-------------|
-| "Remember that Sarah is leaving her job" | Jen captures to **Open Brain** (your memory) |
-| "Remind me what I said about the API redesign" | Jen searches **Open Brain** (your memory) |
-| "Jen, remember that I prefer dark roast coffee" | Jen writes to **her own QMD memory** (agent memory) |
-| "Jen, how do I like my coffee?" | Jen searches **her QMD memory** first |
-| "What do we know about the Martinez project?" | Jen searches **both** — Open Brain for your captured thoughts, QMD for any agent notes |
+### How QMD Works
+
+QMD is Jen's local-first search sidecar. It indexes all Markdown files in her workspace using a hybrid of BM25 full-text search and local vector embeddings with reranking. The Markdown files are the source of truth — QMD just makes them searchable.
+
+| Component | Role |
+|-----------|------|
+| `memory/YYYY-MM-DD.md` | Daily logs — Jen appends notes here as they come up |
+| `MEMORY.md` | Curated long-term memory — the most important things Jen knows about you |
+| QMD index | Automatically indexes all `.md` files for semantic search |
+| `memory_search` tool | Jen's tool for semantic recall across all indexed files (BM25 + vector) |
+| `memory_get` tool | Jen's tool for reading a specific file/line range |
+
+**Writing to Markdown IS writing to QMD.** When Jen appends to `memory/2025-03-15.md`, QMD automatically re-indexes it (default: every 5 minutes). No separate write step needed.
+
+**Both memory systems support semantic search**, but they use different backends:
+- Open Brain: cloud-based embeddings (OpenRouter text-embedding-3-small, 1536 dimensions) + pgvector cosine similarity
+- QMD: local embeddings (node-llama-cpp) + BM25 hybrid search + reranking
+
+| You say... | What happens | Tool used |
+|------------|-------------|-----------|
+| "Remember that Sarah is leaving her job" | Jen captures to **Open Brain** (your memory) | `capture_thought` |
+| "Remind me what I said about the API redesign" | Jen searches **Open Brain** (your memory) | `search_thoughts` |
+| "Jen, remember that I prefer dark roast coffee" | Jen writes to `memory/YYYY-MM-DD.md` → **QMD indexes it** | file write (QMD auto-indexes) |
+| "Jen, how do I like my coffee?" | Jen searches **her QMD-indexed memory** | `memory_search` |
+| "What do we know about the Martinez project?" | Jen searches **both** and labels results by source | `search_thoughts` + `memory_search` |
 
 ---
 
@@ -159,8 +177,8 @@ Use the Open Brain MCP tools when:
 
 Do NOT use Open Brain when:
 
-- Francis says **"Jen, remember..."** or **"Jen, note that I prefer..."** → write to YOUR workspace memory (memory/YYYY-MM-DD.md) instead. These are instructions about how Francis likes things done, his preferences, and your operating notes about him.
-- You need to recall how Francis likes his coffee, his communication preferences, or routines → check YOUR memory first (QMD / memory files)
+- Francis says **"Jen, remember..."** or **"Jen, note that I prefer..."** → write to `memory/YYYY-MM-DD.md` instead (QMD will auto-index it). These are instructions about how Francis likes things done, his preferences, and your operating notes about him.
+- You need to recall how Francis likes his coffee, his communication preferences, or routines → use `memory_search` to search YOUR QMD-indexed memory first
 
 ## The Routing Rule
 
@@ -170,10 +188,10 @@ Do NOT use Open Brain when:
 | "save this / note that / capture" | Open Brain | `capture_thought` |
 | "remind me about..." | Open Brain | `search_thoughts` |
 | "what did I say about..." | Open Brain | `search_thoughts` |
-| "Jen, remember that I..." | Your workspace memory | `memory/YYYY-MM-DD.md` |
-| "Jen, I prefer..." | Your workspace memory | `memory/YYYY-MM-DD.md` |
-| "what do we know about X?" | BOTH | Search Open Brain + your memory |
-| General question about a topic | BOTH if relevant | Check Open Brain for prior context |
+| "Jen, remember that I..." | QMD workspace memory | write to `memory/YYYY-MM-DD.md` (QMD auto-indexes) |
+| "Jen, I prefer..." | QMD workspace memory | write to `memory/YYYY-MM-DD.md` (QMD auto-indexes) |
+| "what do we know about X?" | BOTH | `search_thoughts` + `memory_search` |
+| General question about a topic | BOTH if relevant | `search_thoughts` + `memory_search` |
 
 ## Capture Guidelines
 
@@ -207,7 +225,10 @@ When searching Open Brain:
    - "what did I capture this week?" → `list_thoughts(days: 7)`
    - "show my research from this week" → `list_thoughts(context: "research", days: 7)`
 
-4. **Dual search** — when Francis asks a broad question like "what do we know about X?", search BOTH Open Brain and your QMD memory, then synthesize the results. Present Open Brain results as "from your notes" and QMD results as "from my notes about you."
+4. **Dual search** — when Francis asks a broad question like "what do we know about X?":
+   - Call `search_thoughts(query: "X")` for Open Brain results
+   - Call `memory_search(query: "X")` for QMD results
+   - Synthesize and present results labeled by source: "from your notes" (Open Brain) and "from my notes about you" (QMD)
 
 ## Proactive Memory Use
 
@@ -259,23 +280,23 @@ Jen needs MCP access to the Open Brain Edge Function. Since she already has MCP 
 Francis says something about remembering
 │
 ├── Contains "Jen, remember" / "Jen, note that I" / "Jen, I prefer"
-│   └── → Write to Jen's workspace memory (QMD / memory/YYYY-MM-DD.md)
+│   └── → Write to memory/YYYY-MM-DD.md (QMD auto-indexes)
 │        This is about Francis's preferences, routines, or instructions TO Jen
 │
 ├── Contains "remember" / "save" / "note that" / "capture" (without "Jen,")
-│   └── → Capture to Open Brain via capture_thought
+│   └── → capture_thought to Open Brain
 │        This is Francis's own knowledge he wants stored permanently
 │
 ├── Contains "remind me" / "what did I say" / "find my notes"
-│   └── → Search Open Brain via search_thoughts
+│   └── → search_thoughts on Open Brain
 │
 ├── Contains "what do we know about" / broad topic question
-│   └── → Search BOTH Open Brain AND Jen's QMD memory
+│   └── → search_thoughts (Open Brain) + memory_search (QMD)
 │        Present results from each source clearly labeled
 │
 └── General conversation about a topic
-    └── → Jen silently checks Open Brain for prior context
-         Weaves in relevant findings naturally
+    └── → search_thoughts (Open Brain) + memory_search (QMD)
+         Jen silently checks both, weaves in relevant findings
 ```
 
 ### Example Conversations
@@ -334,19 +355,32 @@ Add these routing instructions to Jen's `AGENTS.md` file so they persist across 
 ```markdown
 ## Memory Routing
 
-You have access to TWO memory systems:
+You have access to TWO memory systems. Use both.
 
-1. **Open Brain** (Francis's memory) — via MCP tools (search_thoughts, capture_thought, list_thoughts, thought_stats, update_thought). This is Francis's personal knowledge base.
+### 1. Open Brain (Francis's memory)
+- **What:** Francis's personal knowledge base — his thoughts, decisions, research, observations
+- **Where:** Supabase via MCP tools
+- **Write tool:** `capture_thought`
+- **Search tool:** `search_thoughts` (semantic vector search)
+- **Browse tool:** `list_thoughts` (filtered listing)
+- **Stats tool:** `thought_stats`
+- **Update tool:** `update_thought` (retag existing thoughts)
 
-2. **Your workspace memory** (your memory about Francis) — via memory/YYYY-MM-DD.md and MEMORY.md files. This is YOUR notes about his preferences, routines, and instructions.
+### 2. Your QMD memory (your memory about Francis)
+- **What:** Your notes about Francis — his preferences, routines, instructions to you, operating context
+- **Where:** Markdown files in your workspace, indexed by QMD (BM25 + vector hybrid search)
+- **Write:** Append to `memory/YYYY-MM-DD.md` (QMD auto-indexes every 5 minutes)
+- **Search tool:** `memory_search` (semantic recall across all indexed markdown)
+- **Read tool:** `memory_get` (read specific file/line range)
+- **Long-term:** Curate important patterns into `MEMORY.md`
 
 ### Routing rules:
 
 - "remember [X]" / "save this" / "note that" / "capture" → Open Brain (`capture_thought`)
-- "Jen, remember [X]" / "Jen, I prefer" / "Jen, note that I" → YOUR workspace memory
+- "Jen, remember [X]" / "Jen, I prefer" / "Jen, note that I" → YOUR QMD memory (write to `memory/YYYY-MM-DD.md`)
 - "remind me about X" / "what did I say about" → Open Brain (`search_thoughts`)
-- "what do we know about X" → Search BOTH, present results labeled by source
-- When Francis brings up a topic, silently check Open Brain for prior context before answering
+- "what do we know about X" → Search BOTH (`search_thoughts` + `memory_search`), present results labeled by source
+- When Francis brings up a topic, silently check both memories for prior context before answering
 
 ### Context assignment:
 
@@ -362,15 +396,15 @@ If unsure, ask Francis: "Should I file this as research, personal, or tools?"
 
 ## Quick Reference Card
 
-| I say... | Jen does... | Where |
-|----------|------------|-------|
-| "Remember that..." | `capture_thought` | Open Brain |
-| "Research: [note]" | `capture_thought` with `context: research` | Open Brain |
-| "Personal: [note]" | `capture_thought` with `context: personal` | Open Brain |
-| "Remind me about X" | `search_thoughts` | Open Brain |
-| "Show my recent tasks" | `list_thoughts(type: "task")` | Open Brain |
-| "Tag that thought as research" | `update_thought` | Open Brain |
-| "Jen, remember I like..." | Write to `memory/YYYY-MM-DD.md` | Jen's QMD |
-| "Jen, how do I like my..." | `memory_search` | Jen's QMD |
-| "What do we know about X?" | Search both, label results | Both |
-| "My thought stats" | `thought_stats` | Open Brain |
+| I say... | Jen does... | Where | Tool |
+|----------|------------|-------|------|
+| "Remember that..." | Captures to my knowledge base | Open Brain | `capture_thought` |
+| "Research: [note]" | Captures with context silo | Open Brain | `capture_thought(context: "research")` |
+| "Personal: [note]" | Captures with context silo | Open Brain | `capture_thought(context: "personal")` |
+| "Remind me about X" | Semantic search my notes | Open Brain | `search_thoughts` |
+| "Show my recent tasks" | Filtered browse | Open Brain | `list_thoughts(type: "task")` |
+| "Tag that thought as research" | Updates metadata | Open Brain | `update_thought` |
+| "Jen, remember I like..." | Writes to daily log, QMD indexes it | QMD | write `memory/YYYY-MM-DD.md` |
+| "Jen, how do I like my..." | Semantic search agent memory | QMD | `memory_search` |
+| "What do we know about X?" | Searches both, labels results | Both | `search_thoughts` + `memory_search` |
+| "My thought stats" | Stats with context breakdown | Open Brain | `thought_stats` |
